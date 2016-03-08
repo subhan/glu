@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2010-2010 LinkedIn, Inc
- * Portions Copyright (c) 2011-2014 Yan Pujante
+ * Portions Copyright (c) 2011-2015 Yan Pujante
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -44,11 +44,6 @@ console.trackerService.zookeeperRoot = '/org/glu'
 // connection timeout when the console tries to talk to the agent (rest)
 console.to.agent.connectionTimeout = "30s"
 
-// set to true if you have been using glu for a while and you really want to preserve
-// backward compatibility in computation of the sha-1/system id (note that turning this
-// to true has serious performance implications)
-console.systemModelRenderer.maintainBackwardCompatibilityInSystemId = false
-
 /////////////////////////////////////////////////////////
 // End Default values
 /////////////////////////////////////////////////////////
@@ -72,30 +67,69 @@ if(System.properties["org.linkedin.glu.${appName}.config.location"]) {
   grails.config.locations << "file:" + System.properties["org.linkedin.glu.${appName}.config.location"]
 }
 
-grails.mime.file.extensions = true // enables the parsing of file extensions from URLs into the request format
-grails.mime.use.accept.header = false
-grails.mime.types = [ html: ['text/html','application/xhtml+xml'],
-                      xml: ['text/xml', 'application/xml'],
-                      text: 'text/plain',
-                      js: 'text/javascript',
-                      rss: 'application/rss+xml',
-                      atom: 'application/atom+xml',
-                      css: 'text/css',
-                      csv: 'text/csv',
-                      all: '*/*',
-                      json: ['application/json','text/json'],
-                      form: 'application/x-www-form-urlencoded',
-                      multipartForm: 'multipart/form-data'
-                    ]
-// The default codec used to encode data with ${}
-grails.views.default.codec="none" // none, html, base64
-grails.views.gsp.encoding="UTF-8"
-grails.converters.encoding="UTF-8"
 
-grails.views.javascript.library="jquery"
+// The ACCEPT header will not be used for content negotiation for user agents containing the following strings (defaults to the 4 major rendering engines)
+grails.mime.disable.accept.header.userAgents = ['Gecko', 'WebKit', 'Presto', 'Trident']
+grails.mime.types = [ // the first one is the default format
+    all:           '*/*', // 'all' maps to '*' or the first available format in withFormat
+    atom:          'application/atom+xml',
+    css:           'text/css',
+    csv:           'text/csv',
+    form:          'application/x-www-form-urlencoded',
+    html:          ['text/html','application/xhtml+xml'],
+    js:            'text/javascript',
+    json:          ['application/json', 'text/json'],
+    multipartForm: 'multipart/form-data',
+    rss:           'application/rss+xml',
+    text:          'text/plain',
+    hal:           ['application/hal+json','application/hal+xml'],
+    xml:           ['text/xml', 'application/xml']
+]
 
+// URL Mapping Cache Max Size, defaults to 5000
+//grails.urlmapping.cache.maxsize = 1000
+
+// Legacy setting for codec used to encode data with ${}
+grails.views.default.codec = "html"
+
+// The default scope for controllers. May be prototype, session or singleton.
+// If unspecified, controllers are prototype scoped.
+grails.controllers.defaultScope = 'singleton'
+
+// GSP settings
+grails {
+    views {
+        gsp {
+            encoding = 'UTF-8'
+            htmlcodec = 'xml' // use xml escaping instead of HTML4 escaping
+            codecs {
+                expression = 'html' // escapes values inside ${}
+                scriptlet = 'html' // escapes output from scriptlets in GSPs
+                taglib = 'none' // escapes output from taglibs
+                staticparts = 'none' // escapes output from static template parts
+            }
+        }
+        // escapes all not-encoded output at final stage of outputting
+        // filteringCodecForContentType.'text/html' = 'html'
+    }
+}
+
+
+grails.converters.encoding = "UTF-8"
+// scaffolding templates configuration
+grails.scaffolding.templates.domainSuffix = 'Instance'
+
+// Set to false to use the new Grails 1.2 JSONBuilder in the render method
+grails.json.legacy.builder = false
 // enabled native2ascii conversion of i18n properties files
 grails.enable.native2ascii = true
+// packages to include in Spring bean scanning
+grails.spring.bean.packages = []
+// whether to disable processing of multi part requests
+grails.web.disable.multipart=false
+
+// request parameters to mask when logging exceptions
+grails.exceptionresolver.params.exclude = ['password']
 
 // extra packages with domain classes
 grails.external.domain.packages = [
@@ -103,9 +137,14 @@ grails.external.domain.packages = [
   'org.linkedin.glu.orchestration.engine.commands'
 ]
 
-// this parameter disables auto flushing in grails which happens when an object is dirty
-// and not saved... when setting this to manual you need to explicitly save the object
-hibernate.flush.mode="manual"
+// configure auto-caching of queries by default (if false you can cache individual queries with 'cache: true')
+grails.hibernate.cache.queries = false
+
+// configure passing transaction's read-only attribute to Hibernate session, queries and criterias
+// set "singleSession = false" OSIV mode in hibernate configuration after enabling
+grails.hibernate.pass.readonly = false
+// configure passing read-only to OSIV session by default, requires "singleSession = false" OSIV mode
+grails.hibernate.osiv.readonly = false
 
 // see ConsoleConfig for explanation
 console.dev.defaults =
@@ -113,7 +152,7 @@ console.dev.defaults =
     customCss: null,
 
     dashboardAgentLinksToAgent: false,
-    
+
       dashboard:
       [
         [ name: "mountPoint", source: "mountPoint" ],
@@ -345,6 +384,7 @@ console.security.roles = [
 
   'GET:/rest/v1/$fabric/plan/$planId/execution/$id': 'USER',
   'HEAD:/rest/v1/$fabric/plan/$planId/execution/$id': 'USER',
+  'DELETE:/rest/v1/$fabric/plan/$planId/execution/$id': 'ADMIN',
 
   /***
    * deployments
@@ -367,6 +407,8 @@ console.security.roles = [
    */
   'POST:/rest/v1/$fabric/model/static': 'ADMIN',
   'GET:/rest/v1/$fabric/model/static': 'USER',
+  'HEAD:/rest/v1/$fabric/models/static': 'USER',
+  'GET:/rest/v1/$fabric/models/static': 'USER',
 
   'GET:/rest/v1/$fabric/model/live': 'USER',
 
@@ -429,6 +471,8 @@ environments {
   }
   development {
 
+    grails.logging.jul.usebridge = true
+
     // read config properties coming from the build
     grails.config.locations << "file:./lib/build.properties.groovy"
 
@@ -484,6 +528,8 @@ environments {
 
       //debug 'org.linkedin.zookeeper.tracker', 'org.linkedin.glu.agent.tracker'
       //debug 'org.apache.http'
+
+      // debug 'org.pongasoft.grailsPlugins'
 
       //debug 'org.linkedin.glu.console.domain'
       //debug 'org.linkedin.glu.spring.resources.GrailsPluginLoadOrderDebugger'
@@ -556,4 +602,3 @@ environments {
 
 
 
-     

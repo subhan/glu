@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2015 Yan Pujante
+ * Copyright (c) 2014 Yan Pujante
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -14,24 +14,21 @@
  * the License.
  */
 
-package org.linkedin.glu.console.domain
+package org.linkedin.glu.console.realms
 
-class LightDbSystemModel
+import javax.naming.Context
+import javax.naming.NamingException
+import javax.naming.spi.InitialContextFactory
+
+/**
+ * @author yan@pongasoft.com  */
+public class MockInitialDirContextFactory implements InitialContextFactory
 {
-  static constraints = {
-    size(nullable: true)
-    name(nullable: true)
-    createdBy(nullable: true) // for backward compatibility
-  }
+  public static Closure initialContextFactory
 
-  static mapping = {
-    table 'db_system_model'
+  public Context getInitialContext(Hashtable environment)
+    throws NamingException
+  {
+    return initialContextFactory(environment);
   }
-
-  Date dateCreated
-  String fabric
-  String systemId
-  Integer size
-  String name
-  String createdBy
 }

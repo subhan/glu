@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2010-2010 LinkedIn, Inc
- * Portions Copyright (c) 2011-2013 Yan Pujante
+ * Portions Copyright (c) 2011-2015 Yan Pujante
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -17,21 +17,21 @@
 
 package org.linkedin.glu.console.controllers
 
+import com.fasterxml.jackson.core.JsonParseException
+import org.linkedin.glu.console.domain.DbCurrentSystem
+import org.linkedin.glu.console.domain.DbSystemModel
+import org.linkedin.glu.console.provisioner.services.storage.SystemStorageException
+import org.linkedin.glu.grails.utils.ConsoleConfig
+import org.linkedin.glu.grails.utils.ConsoleHelper
+import org.linkedin.glu.orchestration.engine.agents.AgentsService
+import org.linkedin.glu.orchestration.engine.system.SystemModelDetails
+import org.linkedin.glu.orchestration.engine.system.SystemService
+import org.linkedin.glu.provisioner.core.model.SystemModel
+import org.linkedin.glu.provisioner.core.model.SystemModelRenderer
 import org.linkedin.glu.provisioner.core.model.builder.ModelBuilderParseException
 import org.linkedin.groovy.util.net.GroovyNetUtils
 
 import javax.servlet.http.HttpServletResponse
-
-import org.linkedin.glu.grails.utils.ConsoleConfig
-
-import org.linkedin.glu.orchestration.engine.system.SystemService
-import org.linkedin.glu.console.provisioner.services.storage.SystemStorageException
-import org.linkedin.glu.grails.utils.ConsoleHelper
-import org.linkedin.glu.provisioner.core.model.SystemModel
-import org.linkedin.glu.orchestration.engine.agents.AgentsService
-import org.linkedin.glu.console.domain.DbSystemModel
-import com.fasterxml.jackson.core.JsonParseException
-import org.linkedin.glu.provisioner.core.model.SystemModelRenderer
 
 /**
  * @author: ypujante@linkedin.com
@@ -55,9 +55,17 @@ public class ModelController extends ControllerBase
     def map =
       systemService.findSystems(request.fabric.name, false, params)
 
+    def current = systemService.findCurrentSystemDetails(request.fabric.name)
+
+    if(current.systemId != request.system?.id)
+    {
+      flash.error("It looks like the current model has been changed... refresh this page")
+    }
+
     [
         systems: map.systems,
-        total: map.count
+        total: map.count,
+        current: current
     ]
   }
 
@@ -66,7 +74,12 @@ public class ModelController extends ControllerBase
    */
   def view = {
     def system = systemService.findDetailsBySystemId(params.id)
-    [systemDetails: system, renderer: systemModelRenderer]
+    def current = systemService.findCurrentSystemDetails(request.fabric.name)
+    if(current.systemId != request.system?.id)
+    {
+      flash.error("It looks like the current model has been changed... refresh this page")
+    }
+    [systemDetails: system, renderer: systemModelRenderer, current: current]
   }
 
   /**
@@ -74,6 +87,7 @@ public class ModelController extends ControllerBase
    */
   def save = {
     def system = DbSystemModel.findBySystemId(params.id)
+    def current = systemService.findCurrentSystemDetails(request.fabric.name)
 
     try
     {
@@ -85,21 +99,33 @@ public class ModelController extends ControllerBase
         return
       }
       systemModel.id = null
-      if(systemService.saveCurrentSystem(systemModel))
-        flash.success = "New system properly saved [${systemModel.id}]"
-      else
-        flash.info = "Already current system"
-      redirect(action: 'view', id: systemModel.id)
+
+      try
+      {
+        def res = doSaveCurrentSystem(systemModel)
+
+        if(res.saved)
+          flash.success = "New system properly saved [${res.system.id}]"
+        else
+          flash.info = "Already current system"
+        redirect(action: 'view', id: res.system.id)
+      }
+      finally
+      {
+        if(!systemModel.id)
+          systemModel.id = params.id
+        system.systemModel = systemModel
+      }
     }
     catch(JsonParseException e)
     {
       flash.error = "Error with the model syntax: ${e.message}"
-      render(view: 'view', id: params.id, model: [systemDetails: system])
+      render(view: 'view', id: params.id, model: [systemDetails: system, renderer: systemModelRenderer, current: current])
     }
     catch(Throwable th)
     {
       flashException("Could not save the new model: ${th.message}", th)
-      render(view: 'view', id: params.id, model: [systemDetails: system])
+      render(view: 'view', id: params.id, model: [systemDetails: system, renderer: systemModelRenderer, current: current])
     }
   }
 
@@ -109,7 +135,7 @@ public class ModelController extends ControllerBase
   def setAsCurrent = {
     try
     {
-      boolean res = systemService.setAsCurrentSystem(request.fabric.name, params.id)
+      boolean res = doSetAsCurrent()
 
       if(res)
         flash.success = "Current system has been set to [${params.id}]"
@@ -132,7 +158,7 @@ public class ModelController extends ControllerBase
   def load = {
     try
     {
-      def res = saveCurrentSystem()
+      def res = doSaveCurrentSystem()
 
       if(res.errors)
       {
@@ -140,7 +166,7 @@ public class ModelController extends ControllerBase
       }
       else
       {
-        flash.success = "Model loaded succesfully"
+        flash.success = "Model loaded successfully"
         redirect(controller: 'dashboard')
       }
     }
@@ -159,7 +185,7 @@ public class ModelController extends ControllerBase
 
   def upload = load
 
-  private def saveCurrentSystem()
+  private def doSaveCurrentSystem()
   {
     def source
     def filename
@@ -178,12 +204,12 @@ public class ModelController extends ControllerBase
 
     SystemModel model = systemService.parseSystemModel(source, filename)
 
-    return saveCurrentSystem(model)
+    return doSaveCurrentSystem(model)
   }
 
-  private def saveCurrentSystem(SystemModel model)
+  private def doSaveCurrentSystem(SystemModel model)
   {
-    withLock('ModelController.saveCurrentSystem') {
+    withCurrentSystemTransaction {
       if(model)
       {
         if(model.fabric != request.fabric.name)
@@ -205,9 +231,63 @@ public class ModelController extends ControllerBase
     }
   }
 
+  private boolean doSetAsCurrent()
+  {
+    withCurrentSystemTransaction {
+      return systemService.setAsCurrentSystem(request.fabric.name, params.id)
+    }
+  }
+
+  private def withCurrentSystemTransaction(Closure closure)
+  {
+    withLock('ModelController.modifyCurrentSystem') {
+      DbCurrentSystem.withNewSession { session ->
+        try
+        {
+          closure()
+        }
+        finally
+        {
+          session.flush()
+          session.clear()
+        }
+      }
+    }
+  }
+
+  /**
+   * POST on /model/static with id
+   */
+  def rest_set_as_current = {
+    try
+    {
+      boolean res = doSetAsCurrent()
+      if(res)
+        response.setStatus(HttpServletResponse.SC_OK)
+      else
+        response.setStatus(HttpServletResponse.SC_NO_CONTENT)
+      render ''
+    }
+    catch(IllegalArgumentException e)
+    {
+      response.setStatus HttpServletResponse.SC_NOT_FOUND
+      render ''
+    }
+  }
+
+  /**
+   * POST on /model/static
+   */
   def rest_upload_model = {
     try
     {
+      // handle set as current
+      if(params.id)
+      {
+        rest_set_as_current()
+        return
+      }
+
       def source
       def filename
 
@@ -240,7 +320,7 @@ public class ModelController extends ControllerBase
 
       SystemModel model = systemService.parseSystemModel(source, filename)
 
-      def res = saveCurrentSystem(model)
+      def res = doSaveCurrentSystem(model)
 
       if(!res.errors)
       {
@@ -269,10 +349,121 @@ public class ModelController extends ControllerBase
   }
 
   /**
-   * Handle GET /model/static
+   * Handle HEAD /models/static
+   */
+  def rest_count_static_models = {
+    response.addHeader("X-glu-current", request.system.id)
+    response.addHeader("X-glu-totalCount",
+                       systemService.getSystemsCount(request.fabric.name).toString())
+    response.setStatus(HttpServletResponse.SC_OK)
+    render ''
+  }
+
+  static def MODEL_SORT_MAPPING = [
+    id         : 'systemId',
+    fabric     : 'fabric',
+    name       : 'name',
+    size       : 'size',
+    timeCreated: 'id',
+    createdBy  : 'createdBy',
+    viewURL    : 'systemId'
+  ]
+
+  /**
+   * Handle GET /models/static
+   */
+  def rest_list_static_models = {
+
+    if(!params.sort || !MODEL_SORT_MAPPING.containsKey(params.sort))
+      params.sort = 'timeCreated'
+
+    def requestedSort = params.sort
+
+    params.sort = MODEL_SORT_MAPPING[params.sort] ?: 'id'
+
+    def map = systemService.findSystems(request.fabric.name, false, params)
+
+    params.sort = requestedSort
+
+    def res = []
+
+    def current = systemService.findCurrentSystemDetails(request.fabric.name)
+
+    map.systems.each { def model ->
+
+      def modelMap = [
+        id         : model.systemId,
+        timeCreated: model.dateCreated.time,
+        createdBy  : model.createdBy,
+        fabric     : model.fabric,
+        size       : model.size,
+        name       : model.name,
+        viewURL    : g.createLink(absolute: true,
+                                  mapping: 'restStaticModel',
+                                  id: model.systemId,
+                                  params: [fabric: request.fabric.name]).toString()
+      ]
+
+      if(current.systemId == model.systemId)
+      {
+        modelMap.timeSetAsCurrent = current.lastUpdated.time
+        modelMap.setAsCurrentBy = current.lastUpdatedBy
+      }
+
+      res << modelMap
+    }
+
+    response.addHeader("X-glu-current", current.systemId)
+    response.addHeader("X-glu-count", map.systems.size().toString())
+    response.addHeader("X-glu-totalCount", map.count.toString())
+    ['max', 'offset', 'sort', 'order'].each { k ->
+      response.addHeader("X-glu-${k}", params[k].toString())
+    }
+
+    response.setContentType('text/json')
+    render prettyPrintJsonWhenRequested(res)
+  }
+
+  /**
+   * Handle GET /model/static/$id?
    */
   def rest_get_static_model = {
-    renderModelWithETag(request.system)
+    SystemModelDetails details
+
+    def current = systemService.findCurrentSystemDetails(request.fabric.name)
+
+    if(params.id)
+    {
+      details = systemService.findDetailsBySystemId(params.id)
+    }
+    else
+    {
+      details = current
+    }
+
+
+    if(!details)
+    {
+      response.setStatus(HttpServletResponse.SC_NOT_FOUND)
+      render ''
+    }
+    else
+    {
+      def headers = [:]
+
+      headers['X-glu-timeCreated'] = details.dateCreated.time
+      if(details.createdBy)
+        headers['X-glu-createdBy'] = details.createdBy
+
+      if(current.systemId == details.systemId)
+      {
+        headers['X-glu-timeSetAsCurrent'] = current.lastUpdated.time
+        if(current.lastUpdatedBy)
+          headers['X-glu-setAsCurrentBy'] = current.lastUpdatedBy
+      }
+
+      renderModelWithETag(details.systemModel, headers)
+    }
   }
 
   /**
@@ -292,7 +483,7 @@ public class ModelController extends ControllerBase
    * same output), so there is no need of separately computing the systemId to include in the ETag
    * which removes an expensive call!
    */
-  private void renderModelWithETag(SystemModel model)
+  private void renderModelWithETag(SystemModel model, Map headers = [:])
   {
     String modelString
 
@@ -312,6 +503,9 @@ ${modelString}
 ${request['javax.servlet.forward.servlet_path']}
 ${request['javax.servlet.forward.query_string']}
 """
+    if(headers)
+      etag += headers.collect {k, v -> "$k:$v"}.join('\n') + "\n"
+
     etag = ConsoleHelper.computeChecksum(etag)
 
     // handling ETag
@@ -323,6 +517,7 @@ ${request['javax.servlet.forward.query_string']}
     }
 
     response.setHeader('Etag', etag)
+    headers.each {k, v -> response.setHeader(k, v.toString())}
     response.setContentType('text/json')
     render modelString
   }
